@@ -1,4 +1,5 @@
 // TODO - Docstring
+
 //! Lock-free ring buffer.
 use std::{
     alloc::{self, Layout},
@@ -7,11 +8,9 @@ use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-const BUFFER_SIZE: usize = 16;
-
 #[derive(Clone, Debug)]
-pub enum BufferError<T> {
-    BufferFull(T),
+pub enum BufferError {
+    BufferFull,
 }
 
 #[allow(dead_code)]
@@ -98,10 +97,8 @@ impl<T> Drop for RawVec<T> {
 // TODO - Add a dropped field to know when the prod/cons has been dropped.
 struct Buffer<T> {
     buffer: RawVec<Option<T>>,
-    // Used to mark a location in the buffer as read/unread.
-    // TODO - Use another container, or find another way to detect a full buffer and discard it?
-    state: [AtomicBool; BUFFER_SIZE],
     capacity: usize,
+    // TODO - Cache alignement
     read: AtomicUsize,
     write: AtomicUsize,
 }
@@ -117,34 +114,43 @@ impl<T> Buffer<T> {
     /// Push a new element in the underlying buffer.
     ///
     /// Increments the `write` pointer by 1.
-    // NOTE - From jonhoo bus crate (broadcast, single producer multiple consumers):
-    // We want to check if the next element is free to ensure to we always leave on empty space
-    // between the head (write) and the tail (read). This is necessary so that the reader can distinguish between
-    // an empty and a full buffer.
-    pub fn write(&mut self, elem: T) -> Result<(), BufferError<T>> {
+    pub fn write(&mut self, elem: T) -> Result<(), BufferError> {
         let write = self.write.load(Ordering::Acquire);
+        let mut next_write = write + 1;
+        if next_write == self.capacity {
+            next_write = 0;
+        }
         // Let the caller do whatever it wants until read has caught up.
-        if self.state[write].load(Ordering::Acquire) {
-            return Err(BufferError::BufferFull(elem));
+        if next_write == self.read.load(Ordering::Acquire) {
+            return Err(BufferError::BufferFull);
         }
-        self.state[write].store(true, Ordering::Release);
-        self.write
-            .store((write + 1) % self.capacity, Ordering::Release);
         unsafe {
-            ptr::write(self.ptr().add(write), Some(elem));
+            ptr::write(&mut *self.ptr().add(write), Some(elem));
         }
+        self.write.store(next_write, Ordering::Release);
+
         Ok(())
     }
 
     /// Remove the element at the given index.
     ///
-    /// Increments the `read` pointer by 1 and marks the location as free.
+    /// Increments the `read` pointer by 1.
     pub fn read(&mut self) -> Option<T> {
         let read = self.read.load(Ordering::Acquire);
-        self.read
-            .store((read + 1) % self.capacity, Ordering::Release);
-        self.state[read].store(false, Ordering::Release);
-        unsafe { std::mem::take(&mut *self.ptr().add(read)) }
+        // Buffer is empty
+        if read == self.write.load(Ordering::Acquire) {
+            None
+        } else {
+            let mut next_read = read + 1;
+            if next_read == self.capacity {
+                next_read = 0;
+            }
+            unsafe {
+                let elem = ptr::read(&mut *self.ptr().add(read));
+                self.read.store(next_read, Ordering::Release);
+                elem
+            }
+        }
     }
 }
 
@@ -175,14 +181,11 @@ pub struct RingBuffer<T> {
     _phantom: PhantomData<T>,
 }
 
-const INITIAL_STATE: AtomicBool = AtomicBool::new(false);
-
 impl<T> RingBuffer<T> {
     /// Initialize ring buffer with the given capacity.
     pub fn new(capacity: usize) -> (Producer<T>, Consummer<T>) {
         let buffer = Box::into_raw(Box::new(Buffer {
             buffer: RawVec::with_capacity(capacity),
-            state: [INITIAL_STATE; BUFFER_SIZE],
             capacity,
             read: 0.into(),
             write: 0.into(),
@@ -201,7 +204,7 @@ impl<T> RingBuffer<T> {
 impl<T> Producer<T> {
     // TODO - Implement Future for Buffer so that we can await instead of blocking (separate impl)
     //      - Check if consumer has been dropped
-    pub fn send(&mut self, elem: T) -> Result<(), BufferError<T>> {
+    pub fn send(&mut self, elem: T) -> Result<(), BufferError> {
         unsafe { self.buffer.ptr().as_mut().unwrap().write(elem) }
     }
 }
@@ -224,33 +227,37 @@ impl<T> Iterator for Consummer<T> {
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::{RingBuffer, BUFFER_SIZE},
-        minstant::Instant,
-        std::thread,
-    };
+    use {super::RingBuffer, minstant::Instant, std::thread};
 
-    // TODO - Benchmarck with TSC
+    const BUFFER_SIZE: usize = 16;
+
+    // TODO - Benchmark with TSC (with no logging)
     #[test]
     fn buffer() {
         let (mut producer, mut consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
 
         let producer = thread::spawn(move || loop {
-            for i in 0..BUFFER_SIZE * 256 {
-                let start = Instant::now();
+            for i in 0..BUFFER_SIZE * 64 {
+                //let start = Instant::now();
                 if let Err(_) = producer.send(i.to_string()) {
                     //println!("Buffer is full!");
                 }
-                println!("Took {:?} to produce value", start.elapsed());
+                //println!("Took {:?} to produce value", start.elapsed());
             }
         });
         let consumer = thread::spawn(move || {
             loop {
-                let start = Instant::now();
-                if let Some(Some(_)) = consumer.next() {
-                    //println!("received {val:?}");
+                //let start = Instant::now();
+                match consumer.next() {
+                    Some(Some(_)) => {
+                        //println!("received {val:?}");
+                    }
+                    Some(None) => {
+                        //println!("Buffer is empty");
+                    }
+                    _ => {}
                 }
-                println!("Took {:?} to consume value", start.elapsed());
+                //println!("Took {:?} to consume value", start.elapsed());
             }
         });
         producer.join().unwrap();
