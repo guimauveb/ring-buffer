@@ -1,4 +1,10 @@
 // TODO - Docstring
+//      - Add a dropped field to the buffer to know when the prod/cons was dropped.
+//      - Benchmark with TSC (with no logging)
+//      - Implement Future for Buffer so that we can await instead of blocking (separate impl)
+//      - Compare perf with/without pinned threads
+//      - Handle alloc errors
+//      - Cache alignement between read/write to avoid false sharing (https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size)
 
 //! Lock-free ring buffer.
 use std::{
@@ -31,20 +37,32 @@ fn alloc_guard(alloc_size: usize) -> Result<(), ()> {
     }
 }
 
-/// A low-level utility for more ergonomically allocating, reallocating, and deallocating
-/// a buffer of memory on the heap without having to worry about all the corner cases
-/// involved. This type is excellent for building your own data structures like Vec and VecDeque.
-struct RawVec<T> {
+/// Thread safe pre-allocated contiguous buffer.
+struct Buffer<T> {
     ptr: NonNull<T>,
-    cap: usize,
+    capacity: usize,
+    // TODO - Cache alignement (https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size)
+    read: AtomicUsize,
+    write: AtomicUsize,
 }
 
-unsafe impl<T: Send> Send for RawVec<T> {}
-unsafe impl<T: Sync> Sync for RawVec<T> {}
+impl<T> Drop for Buffer<T> {
+    fn drop(&mut self) {
+        if self.capacity != 0 {
+            let layout = Layout::array::<T>(self.capacity).unwrap();
+            unsafe {
+                alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            }
+        }
+    }
+}
 
-impl<T> RawVec<T> {
+unsafe impl<T: Send> Send for Buffer<T> {}
+unsafe impl<T: Sync> Sync for Buffer<T> {}
+
+impl<T> Buffer<T> {
     // TODO - Call alloc error methods.
-    fn allocate_in(capacity: usize, init: AllocInit) -> Self {
+    fn allocate_in(capacity: usize, init: AllocInit) -> NonNull<T> {
         let layout = match Layout::array::<T>(capacity) {
             Ok(layout) => layout,
             Err(_) => todo!("Handle alloc_guard error"), // capacity_overflow(),
@@ -61,54 +79,18 @@ impl<T> RawVec<T> {
             // Allocators currently return a `NonNull<[u8]>` whose length
             // matches the size requested. If that ever changes, the capacity
             // here should change to `ptr.len() / mem::size_of::<T>()`.
-            Self {
-                ptr: NonNull::new_unchecked(ptr.cast()),
-                cap: capacity,
-            }
+            NonNull::new_unchecked(ptr.cast())
         }
     }
 
     /// Constructs a new RawVec<T> with at least the specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::allocate_in(capacity, AllocInit::Zeroed)
-    }
-
-    #[allow(dead_code)]
-    pub fn new() -> Self {
         Self {
-            ptr: NonNull::dangling(),
-            cap: 0,
+            ptr: Self::allocate_in(capacity, AllocInit::Zeroed),
+            capacity,
+            read: 0.into(),
+            write: 0.into(),
         }
-    }
-}
-
-impl<T> Drop for RawVec<T> {
-    fn drop(&mut self) {
-        if self.cap != 0 {
-            let layout = Layout::array::<T>(self.cap).unwrap();
-            unsafe {
-                alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
-            }
-        }
-    }
-}
-
-/// Thread safe pre-allocated contiguous buffer.
-// TODO - Add a dropped field to know when the prod/cons has been dropped.
-struct Buffer<T> {
-    buffer: RawVec<Option<T>>,
-    capacity: usize,
-    // TODO - Cache alignement
-    read: AtomicUsize,
-    write: AtomicUsize,
-}
-
-unsafe impl<T: Send> Send for Buffer<T> {}
-unsafe impl<T: Sync> Sync for Buffer<T> {}
-
-impl<T> Buffer<T> {
-    fn ptr(&self) -> *mut Option<T> {
-        self.buffer.ptr.as_ptr()
     }
 
     /// Push a new element in the underlying buffer.
@@ -121,11 +103,12 @@ impl<T> Buffer<T> {
             next_write = 0;
         }
         // Let the caller do whatever it wants until read has caught up.
+        // TODO - In async impl, set the writer to awake the read caller.
         if next_write == self.read.load(Ordering::Acquire) {
             return Err(BufferError::BufferFull);
         }
         unsafe {
-            ptr::write(&mut *self.ptr().add(write), Some(elem));
+            ptr::write(&mut *self.ptr.as_ptr().add(write), elem);
         }
         self.write.store(next_write, Ordering::Release);
 
@@ -146,9 +129,9 @@ impl<T> Buffer<T> {
                 next_read = 0;
             }
             unsafe {
-                let elem = ptr::read(&mut *self.ptr().add(read));
+                let elem = ptr::read(&mut *self.ptr.as_ptr().add(read));
                 self.read.store(next_read, Ordering::Release);
-                elem
+                Some(elem)
             }
         }
     }
@@ -182,14 +165,9 @@ pub struct RingBuffer<T> {
 }
 
 impl<T> RingBuffer<T> {
-    /// Initialize ring buffer with the given capacity.
+    /// Initialize a ring buffer with the given capacity.
     pub fn new(capacity: usize) -> (Producer<T>, Consummer<T>) {
-        let buffer = Box::into_raw(Box::new(Buffer {
-            buffer: RawVec::with_capacity(capacity),
-            capacity,
-            read: 0.into(),
-            write: 0.into(),
-        }));
+        let buffer = Box::into_raw(Box::new(Buffer::with_capacity(capacity)));
         (
             Producer {
                 buffer: BufferRaw(buffer),
@@ -202,21 +180,17 @@ impl<T> RingBuffer<T> {
 }
 
 impl<T> Producer<T> {
-    // TODO - Implement Future for Buffer so that we can await instead of blocking (separate impl)
-    //      - Check if consumer has been dropped
     pub fn send(&mut self, elem: T) -> Result<(), BufferError> {
         unsafe { self.buffer.ptr().as_mut().unwrap().write(elem) }
     }
 }
 
-// TODO - Check if producer has been dropped
 impl<T> Consummer<T> {
     pub fn recv(&mut self) -> Option<T> {
         unsafe { self.buffer.ptr().as_mut().unwrap().read() }
     }
 }
 
-// TODO
 impl<T> Iterator for Consummer<T> {
     type Item = Option<T>;
 
@@ -231,7 +205,6 @@ mod tests {
 
     const BUFFER_SIZE: usize = 16;
 
-    // TODO - Benchmark with TSC (with no logging)
     #[test]
     fn buffer() {
         let (mut producer, mut consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
@@ -240,7 +213,7 @@ mod tests {
             for i in 0..BUFFER_SIZE * 64 {
                 //let start = Instant::now();
                 if let Err(_) = producer.send(i.to_string()) {
-                    //println!("Buffer is full!");
+                    println!("Buffer is full!");
                 }
                 //println!("Took {:?} to produce value", start.elapsed());
             }
@@ -249,11 +222,11 @@ mod tests {
             loop {
                 //let start = Instant::now();
                 match consumer.next() {
-                    Some(Some(_)) => {
-                        //println!("received {val:?}");
+                    Some(Some(val)) => {
+                        println!("received {val:?}");
                     }
                     Some(None) => {
-                        //println!("Buffer is empty");
+                        println!("Buffer is empty");
                     }
                     _ => {}
                 }
