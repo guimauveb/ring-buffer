@@ -1,11 +1,10 @@
-// TODO - Docstring
-//      - Benchmark with TSC (with no logging)
+// TODO - Benchmark with TSC (with no logging)
 //      - Implement Future for Buffer so that we can await instead of blocking (separate impl)
 //      - Compare perf with/without pinned threads
 //      - Cache alignement between read/write to avoid false sharing (https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size) and compare perf
 //      with/without padding.
 
-//! Lock-free ring buffer.
+//! Lock-free, thread safe ring buffer.
 use std::{
     alloc::{self, Layout},
     marker::PhantomData,
@@ -132,11 +131,12 @@ impl<T> Buffer<T> {
 
     /// Read the next readable element from the buffer.
     ///
-    /// `None` is returned if the buffer is empty.
+    /// If the producer was dropped and the buffer is empty, [BufferError::Read] is returned to
+    /// signal that the buffer will not contain any value anymore.
+    /// `None` is returned if the buffer is empty but the producer is still alive.
     fn read(&mut self) -> Result<Option<T>, BufferError> {
         let read = self.read.load(Ordering::Acquire);
         // Buffer is empty
-        // TODO - If buffer is empty and producer was closed, return BufferError::Read and stop iterator.
         if read == self.write.load(Ordering::Acquire) {
             if self.dropped.load(Ordering::Acquire) {
                 Err(BufferError::Read)
@@ -187,9 +187,18 @@ impl<T> Producer<T> {
 }
 
 impl<T> Drop for Producer<T> {
-    // TODO - Need to manually free memory?
+    /// If dropped is true, the consumer has already been dropped and is handling (or has
+    /// already handled) the deallocation. Otherwise, drop the buffer and set the boolean to true.
     fn drop(&mut self) {
-        unsafe { (*self.buffer.ptr()).dropped.store(true, Ordering::Release) };
+        unsafe {
+            let buffer = &mut *self.buffer.ptr();
+            if (*buffer).dropped.load(Ordering::Acquire) {
+                return;
+            } else {
+                buffer.dropped.store(true, Ordering::Release);
+                drop(buffer);
+            }
+        }
     }
 }
 
@@ -201,7 +210,9 @@ pub struct Consumer<T> {
 impl<T> Consumer<T> {
     /// Pop the next available element from the buffer.
     ///
-    /// `None` is returned if the buffer is empty.
+    /// If the producer was dropped and the buffer is empty, [BufferError::Read] is returned to
+    /// signal that the buffer will not contain any value anymore.
+    /// `None` is returned if the buffer is empty but the producer is still alive.
     #[inline]
     pub fn pop(&mut self) -> Result<Option<T>, BufferError> {
         unsafe { self.buffer.ptr().as_mut().unwrap().read() }
@@ -209,9 +220,18 @@ impl<T> Consumer<T> {
 }
 
 impl<T> Drop for Consumer<T> {
-    // TODO - Need to manually free memory?
+    /// If dropped is true, the producer has already been dropped and is handling (or has
+    /// already handled) the deallocation.
     fn drop(&mut self) {
-        unsafe { (*self.buffer.ptr()).dropped.store(true, Ordering::Release) };
+        unsafe {
+            let buffer = &mut *self.buffer.ptr();
+            if (*buffer).dropped.load(Ordering::Acquire) {
+                return;
+            } else {
+                buffer.dropped.store(true, Ordering::Release);
+                drop(buffer);
+            }
+        }
     }
 }
 
@@ -266,6 +286,13 @@ mod tests {
 
     const BUFFER_SIZE: usize = 16;
 
+    // TODO - Test producer and consumer in different threads
+    //      - Test empty buffer
+    //      - Test full buffer
+    //      - Test producer droppped, consumer alive, buffer not empty, consumer consumes until
+    //      buffer is empty.
+    //      - Test consumer dropped, producer alive, producer should stop writing
+    //      - Test consumer dropped, producer dropped, cannot access to buffer memory anymore.
     #[test]
     fn buffer() {
         let (mut producer, mut consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
@@ -278,24 +305,11 @@ mod tests {
                 }
                 println!("Took {:?} to produce value", start.elapsed());
             }
-            thread::sleep(Duration::from_secs(10));
+            //thread::sleep(Duration::from_secs(10));
         });
         let consumer = thread::spawn(move || {
-            loop {
-                let start = Instant::now();
-                match consumer.next() {
-                    Some(Some(val)) => {
-                        //println!("received {val:?}");
-                    }
-                    Some(None) => {
-                        //println!("Buffer is empty");
-                    }
-                    None => {
-                        println!("Channel is closed");
-                        panic!();
-                    }
-                }
-                println!("Took {:?} to consume value", start.elapsed());
+            while let Some(value) = consumer.next() {
+                println!("Received value: {value:?}");
             }
         });
         producer.join().unwrap();
