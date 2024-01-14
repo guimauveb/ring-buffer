@@ -1,8 +1,13 @@
-// TODO - Benchmark with TSC (with no logging)
-//      - Implement Future for Buffer so that we can await instead of blocking (separate impl)
-//      - Compare perf with/without pinned threads
-//      - Cache alignement between read/write to avoid false sharing (https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size) and compare perf
-//      with/without padding.
+// - TODO
+// - Cache alignement between read/write to avoid false sharing (https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size)
+// - Compare perf with/without padding
+// - Benchmark
+// - Implement Future for producer/consumer so that we can await instead of blocking:
+//     - From the consumer side, await for the producer to produce a value or be dropped
+//     - From the producer side, await for the consumer to read a value to free space or be dropped
+//
+// Bonus
+// - Compare perf with/without pinned threads
 
 //! Lock-free, thread safe ring buffer.
 use std::{
@@ -49,7 +54,6 @@ pub enum BufferError {
 struct Buffer<T> {
     ptr: NonNull<T>,
     capacity: usize,
-    // TODO - Cache alignement (https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size)
     read: AtomicUsize,
     write: AtomicUsize,
     dropped: AtomicBool,
@@ -70,7 +74,6 @@ unsafe impl<T: Send> Send for Buffer<T> {}
 unsafe impl<T: Sync> Sync for Buffer<T> {}
 
 impl<T> Buffer<T> {
-    // TODO - Allocate capacity + padding to avoid false sharing
     fn allocate(capacity: usize, init: AllocInit) -> NonNull<T> {
         let layout = match Layout::array::<T>(capacity) {
             Ok(layout) => layout,
@@ -108,17 +111,20 @@ impl<T> Buffer<T> {
     /// If the consumer was dropped, [BufferError::Write] is returned and it should no longer be possible to consume values from the buffer.
     /// If the buffer is full, [BufferError::BufferFull] is returned. It's up to the caller to call this method again until space has been freed.
     fn write(&mut self, elem: T) -> Result<(), BufferError> {
+        // Consumer was dropped, the channel is closed.
         if self.dropped.load(Ordering::Acquire) {
             return Err(BufferError::Write);
-        };
-        let write = self.write.load(Ordering::Acquire);
+        }
+        let (write, read) = (
+            self.write.load(Ordering::Acquire),
+            self.read.load(Ordering::Acquire),
+        );
         let mut next_write = write + 1;
         if next_write == self.capacity {
             next_write = 0;
         }
-        // Return immediately Let the caller do whatever it wants until read has caught up.
-        // TODO - In future impl, set the writer to awake the read caller.
-        if next_write == self.read.load(Ordering::Acquire) {
+        // Buffer is full. Return immediately and let the caller do whatever it wants until read has caught up.
+        if next_write == read {
             return Err(BufferError::BufferFull);
         }
         unsafe {
@@ -138,6 +144,7 @@ impl<T> Buffer<T> {
         let read = self.read.load(Ordering::Acquire);
         // Buffer is empty
         if read == self.write.load(Ordering::Acquire) {
+            // Buffer is empty and producer was dropped, signals that the channel is closed.
             if self.dropped.load(Ordering::Acquire) {
                 Err(BufferError::Read)
             } else {
@@ -187,17 +194,13 @@ impl<T> Producer<T> {
 }
 
 impl<T> Drop for Producer<T> {
-    /// If dropped is true, the consumer has already been dropped and is handling (or has
-    /// already handled) the deallocation. Otherwise, drop the buffer and set the boolean to true.
     fn drop(&mut self) {
         unsafe {
-            let buffer = &mut *self.buffer.ptr();
-            if (*buffer).dropped.load(Ordering::Acquire) {
-                return;
-            } else {
-                buffer.dropped.store(true, Ordering::Release);
-                drop(buffer);
-            }
+            let buffer = self.buffer.ptr();
+            // Mark the producer as dropped so that the consumer knows that this channel is closed
+            // and will no longer receive values.
+            // The consumer frees the buffer in its drop implementation.
+            (*buffer).dropped.store(true, Ordering::Release);
         }
     }
 }
@@ -220,17 +223,14 @@ impl<T> Consumer<T> {
 }
 
 impl<T> Drop for Consumer<T> {
-    /// If dropped is true, the producer has already been dropped and is handling (or has
-    /// already handled) the deallocation.
     fn drop(&mut self) {
         unsafe {
-            let buffer = &mut *self.buffer.ptr();
-            if (*buffer).dropped.load(Ordering::Acquire) {
-                return;
-            } else {
-                buffer.dropped.store(true, Ordering::Release);
-                drop(buffer);
-            }
+            let buffer = self.buffer.ptr();
+            // Mark the consumer as dropped so that the producer knows that this channel is closed
+            // and will no longer receive values.
+            (*buffer).dropped.store(true, Ordering::Release);
+            // Free the buffer memory.
+            ptr::drop_in_place(buffer);
         }
     }
 }
@@ -244,6 +244,7 @@ impl<T> Iterator for Consumer<T> {
                 Ok(Some(elem)) => Some(Some(elem)),
                 Ok(None) => Some(None),
                 Err(err) => {
+                    // Buffer is empty and producer was dropped, stop the iteration.
                     if err == BufferError::Read {
                         None
                     } else {
@@ -255,7 +256,7 @@ impl<T> Iterator for Consumer<T> {
     }
 }
 
-/// Thread safe pre-allocated contiguous ring buffer.
+/// Lock-free, thread safe ring buffer.
 pub struct RingBuffer<T> {
     _phantom: PhantomData<T>,
 }
@@ -276,41 +277,28 @@ impl<T> RingBuffer<T> {
     }
 }
 
+// TODO
 #[cfg(test)]
 mod tests {
-    use {
-        super::RingBuffer,
-        minstant::Instant,
-        std::{thread, time::Duration},
-    };
+    use {super::RingBuffer, std::thread};
 
     const BUFFER_SIZE: usize = 16;
 
-    // TODO - Test producer and consumer in different threads
-    //      - Test empty buffer
-    //      - Test full buffer
-    //      - Test producer droppped, consumer alive, buffer not empty, consumer consumes until
-    //      buffer is empty.
-    //      - Test consumer dropped, producer alive, producer should stop writing
-    //      - Test consumer dropped, producer dropped, cannot access to buffer memory anymore.
     #[test]
-    fn buffer() {
-        let (mut producer, mut consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
-
+    fn ring_buffer() {
+        let (mut producer, consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
         let producer = thread::spawn(move || {
             for i in 0..BUFFER_SIZE * 64 {
-                let start = Instant::now();
                 if producer.push(i.to_string()).is_err() {
-                    //println!("Buffer is full!");
+                    println!("Buffer is full!");
                 }
-                println!("Took {:?} to produce value", start.elapsed());
             }
-            //thread::sleep(Duration::from_secs(10));
         });
         let consumer = thread::spawn(move || {
-            while let Some(value) = consumer.next() {
+            for value in consumer {
                 println!("Received value: {value:?}");
             }
+            println!("Iteration is done");
         });
         producer.join().unwrap();
         consumer.join().unwrap();
