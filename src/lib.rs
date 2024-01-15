@@ -77,11 +77,15 @@ impl<T> Buffer<T> {
     fn allocate(capacity: usize, init: AllocInit) -> NonNull<T> {
         let layout = match Layout::array::<T>(capacity) {
             Ok(layout) => layout,
-            Err(err) => panic!("Capacity overflow: {err:?}"),
+            Err(err) => {
+                panic!("Capacity overflow: {err:?}");
+            }
         };
         match alloc_guard(layout.size()) {
             Ok(_) => {}
-            Err(err) => panic!("Capacity overflow: {err:?}"),
+            Err(err) => {
+                panic!("Capacity overflow: {err:?}");
+            }
         }
         unsafe {
             let ptr = match init {
@@ -144,7 +148,7 @@ impl<T> Buffer<T> {
         let read = self.read.load(Ordering::Acquire);
         // Buffer is empty
         if read == self.write.load(Ordering::Acquire) {
-            // Buffer is empty and producer was dropped, signals that the channel is closed.
+            // Buffer is empty and producer was dropped, the channel is closed.
             if self.dropped.load(Ordering::Acquire) {
                 Err(BufferError::Read)
             } else {
@@ -265,7 +269,7 @@ impl<T> RingBuffer<T> {
     /// Initialize a ring buffer with the given capacity.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(capacity: usize) -> (Producer<T>, Consumer<T>) {
-        let buffer = Box::into_raw(Box::new(Buffer::with_capacity(capacity)));
+        let buffer = Box::into_raw(Box::new(Buffer::with_capacity(capacity + 1)));
         (
             Producer {
                 buffer: BufferRaw(buffer),
@@ -287,20 +291,22 @@ mod tests {
     #[test]
     fn ring_buffer() {
         let (mut producer, consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
-        let producer = thread::spawn(move || {
+        let producer_thread = thread::spawn(move || {
             for i in 0..BUFFER_SIZE * 64 {
                 if producer.push(i.to_string()).is_err() {
                     println!("Buffer is full!");
+                } else {
+                    println!("Sending value: {i}");
                 }
             }
         });
+        producer_thread.join().unwrap();
         let consumer = thread::spawn(move || {
             for value in consumer {
                 println!("Received value: {value:?}");
             }
             println!("Iteration is done");
         });
-        producer.join().unwrap();
         consumer.join().unwrap();
     }
 }
