@@ -1,10 +1,3 @@
-// - TODO
-//  - Async implementation for producer/consumer so that we can await instead of blocking:
-//      - From the consumer side, await for the producer to produce a value or be dropped
-//      - From the producer side, await for the consumer to read a value to free space or be dropped
-//   - Implementation where threads are parked/unparked when channel is empty/full
-//
-
 //! Lock-free, thread safe ring buffer.
 
 // #[cfg(feature = "jemalloc")]
@@ -289,10 +282,6 @@ impl<T> RingBuffer<T> {
     }
 }
 
-// TODO - Ensure correctness (memory safety)
-//      - Measure througput
-//      - Compare default allocator against jemalloc
-//      - Compare buffer w/wo cache alignement
 #[cfg(test)]
 mod tests {
     use {super::RingBuffer, std::thread};

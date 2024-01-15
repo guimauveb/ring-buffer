@@ -1,6 +1,3 @@
-// NOTE - Default allocator is twice as fast as jemalloc, at least in the only test case.
-// TODO - Bench with more types
-//      - Bench cache alignement (w/wo)
 use {
     criterion::{criterion_group, criterion_main, Criterion},
     ring_buffer::RingBuffer,
