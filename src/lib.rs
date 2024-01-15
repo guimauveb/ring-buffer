@@ -1,15 +1,21 @@
 // - TODO
-// - Cache alignement between read/write to avoid false sharing (https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size)
-// - Compare perf with/without padding
-// - Benchmark
-// - Implement Future for producer/consumer so that we can await instead of blocking:
-//     - From the consumer side, await for the producer to produce a value or be dropped
-//     - From the producer side, await for the consumer to read a value to free space or be dropped
+//  - Async implementation for producer/consumer so that we can await instead of blocking:
+//      - From the consumer side, await for the producer to produce a value or be dropped
+//      - From the producer side, await for the consumer to read a value to free space or be dropped
+//   - Implementation where threads are parked/unparked when channel is empty/full
 //
-// Bonus
-// - Compare perf with/without pinned threads
 
 //! Lock-free, thread safe ring buffer.
+
+// #[cfg(feature = "jemalloc")]
+// #[cfg(not(target_env = "msvc"))]
+// use tikv_jemallocator::Jemalloc;
+//
+// #[cfg(feature = "jemalloc")]
+// #[cfg(not(target_env = "msvc"))]
+// #[global_allocator]
+// static GLOBAL: Jemalloc = Jemalloc;
+
 use std::{
     alloc::{self, Layout},
     marker::PhantomData,
@@ -51,6 +57,7 @@ pub enum BufferError {
 }
 
 /// Thread safe pre-allocated contiguous buffer.
+#[repr(align(64))]
 struct Buffer<T> {
     ptr: NonNull<T>,
     capacity: usize,
@@ -198,18 +205,19 @@ impl<T> Producer<T> {
 }
 
 impl<T> Drop for Producer<T> {
+    /// Only marks the producer as dropped so that the consumer knows that this channel is closed
+    /// and will no longer receive values.
+    ///
+    /// It is the [Consumer] responsibility to free the buffer in its drop implementation.
     fn drop(&mut self) {
         unsafe {
             let buffer = self.buffer.ptr();
-            // Mark the producer as dropped so that the consumer knows that this channel is closed
-            // and will no longer receive values.
-            // The consumer frees the buffer in its drop implementation.
             (*buffer).dropped.store(true, Ordering::Release);
         }
     }
 }
 
-/// A consumer interface into a [Buffer]
+/// A consumer interface into a [Buffer].
 pub struct Consumer<T> {
     buffer: BufferRaw<T>,
 }
@@ -281,7 +289,10 @@ impl<T> RingBuffer<T> {
     }
 }
 
-// TODO
+// TODO - Ensure correctness (memory safety)
+//      - Measure througput
+//      - Compare default allocator against jemalloc
+//      - Compare buffer w/wo cache alignement
 #[cfg(test)]
 mod tests {
     use {super::RingBuffer, std::thread};
@@ -291,22 +302,13 @@ mod tests {
     #[test]
     fn ring_buffer() {
         let (mut producer, consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
-        let producer_thread = thread::spawn(move || {
-            for i in 0..BUFFER_SIZE * 64 {
-                if producer.push(i.to_string()).is_err() {
-                    println!("Buffer is full!");
-                } else {
-                    println!("Sending value: {i}");
-                }
+        let p = thread::spawn(move || {
+            for i in 0..BUFFER_SIZE * 1000 {
+                _ = producer.push(i.to_string());
             }
         });
-        producer_thread.join().unwrap();
-        let consumer = thread::spawn(move || {
-            for value in consumer {
-                println!("Received value: {value:?}");
-            }
-            println!("Iteration is done");
-        });
-        consumer.join().unwrap();
+        let c = thread::spawn(move || for _ in consumer {});
+        p.join().unwrap();
+        c.join().unwrap();
     }
 }
