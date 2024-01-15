@@ -1,13 +1,13 @@
 //! Lock-free, thread safe ring buffer.
 
-// #[cfg(feature = "jemalloc")]
-// #[cfg(not(target_env = "msvc"))]
-// use tikv_jemallocator::Jemalloc;
-//
-// #[cfg(feature = "jemalloc")]
-// #[cfg(not(target_env = "msvc"))]
-// #[global_allocator]
-// static GLOBAL: Jemalloc = Jemalloc;
+#[cfg(feature = "jemalloc")]
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "jemalloc")]
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 use std::{
     alloc::{self, Layout},
