@@ -18,9 +18,46 @@ fn ring_buffer(capacity: usize) {
     c.join().unwrap();
 }
 
+fn ring_buffer_exceeds(capacity: usize) {
+    let (mut producer, consumer) = RingBuffer::new(capacity);
+    let p = thread::spawn(move || {
+        for _ in 0..(capacity * capacity) {
+            _ = producer.push(VAL);
+        }
+    });
+    let c = thread::spawn(move || for _ in consumer {});
+    p.join().unwrap();
+    c.join().unwrap();
+}
+
+fn ring_buffer_exceeds_pinned(capacity: usize) {
+    let (mut producer, consumer) = RingBuffer::new(capacity);
+    let p = thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: 0 });
+        for _ in 0..capacity {
+            _ = producer.push(VAL);
+        }
+    });
+    let c = thread::spawn(move || {
+        core_affinity::set_for_current(core_affinity::CoreId { id: 1 });
+        for _ in consumer {}
+    });
+
+    p.join().unwrap();
+    c.join().unwrap();
+}
+
 fn criterion_benchmark(c: &mut Criterion) {
-    // TODO - default / jemalloc
-    c.bench_function("ring-buffer 4096", |b| b.iter(|| ring_buffer(4096)));
+    //c.bench_function("ring-buffer 4096 str", |b| b.iter(|| ring_buffer(4096)));
+    // c.bench_function("ring-buffer 4096 str exceeds capacity", |b| {
+    //     b.iter(|| ring_buffer_exceeds(4096))
+    // });
+    c.bench_function("ring-buffer 4096 str exceeds capacity pinned", |b| {
+        b.iter(|| ring_buffer_exceeds_pinned(4096))
+    });
+    c.bench_function("ring-buffer 4096*4096 str exceeds capacity pinned", |b| {
+        b.iter(|| ring_buffer_exceeds_pinned(4096 * 4096))
+    });
 }
 
 criterion_group!(benches, criterion_benchmark);

@@ -1,5 +1,4 @@
 //! Lock-free, thread safe ring buffer.
-
 #[cfg(feature = "jemalloc")]
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -119,17 +118,18 @@ impl<T> Buffer<T> {
         if self.dropped.load(Ordering::Acquire) {
             return Err(BufferError::Write);
         }
-        let (write, read) = (
-            self.write.load(Ordering::Acquire),
-            self.read.load(Ordering::Acquire),
-        );
+        let write = self.write.load(Ordering::Acquire);
         let mut next_write = write + 1;
         if next_write == self.capacity {
             next_write = 0;
         }
-        // Buffer is full. Return immediately and let the caller do whatever it wants until read has caught up.
-        if next_write == read {
-            return Err(BufferError::BufferFull);
+        loop {
+            let read = self.read.load(Ordering::Acquire);
+            // Buffer is full. Busy spin until read has caught up.
+            if next_write == read {
+                continue;
+            }
+            break;
         }
         unsafe {
             ptr::write(&mut *self.ptr.as_ptr().add(write), elem);
@@ -248,13 +248,9 @@ impl<T> Iterator for Consumer<T> {
             match self.buffer.ptr().as_mut().unwrap().read() {
                 Ok(Some(elem)) => Some(Some(elem)),
                 Ok(None) => Some(None),
-                Err(err) => {
+                Err(_) => {
                     // Buffer is empty and producer was dropped, stop the iteration.
-                    if err == BufferError::Read {
-                        None
-                    } else {
-                        Some(None)
-                    }
+                    None
                 }
             }
         }

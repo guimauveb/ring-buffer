@@ -12,6 +12,7 @@ tikv-jemallocator = { version = "0.5", optional = true }
 [dev-dependencies]
 minstant = "0.1"
 criterion = { version = "0.5", features = ["html_reports"] }
+core_affinity = "0.8"
 
 [profile.test]
 opt-level = 3
