@@ -2,6 +2,10 @@
 
 Implementation of a lock-free, thread safe ring buffer in Rust.
 
+## Architecture
+
+TODO
+
 ## TODO
   ### Features
   - Implement optimizations from https://rigtorp.se/ringbuffer/
