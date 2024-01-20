@@ -40,8 +40,6 @@ fn alloc_guard(alloc_size: usize) -> Result<(), AllocError> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BufferError {
-    /// Buffer is full
-    BufferFull,
     /// Consumer has been dropped
     Write,
     /// Producer has been dropped
@@ -112,7 +110,8 @@ impl<T> Buffer<T> {
     /// Write a new element in the underlying buffer.
     ///
     /// If the consumer was dropped, [BufferError::Write] is returned and it should no longer be possible to consume values from the buffer.
-    /// If the buffer is full, [BufferError::BufferFull] is returned. It's up to the caller to call this method again until space has been freed.
+    /// If the buffer is full, the methods busy spins until the consumer has caught up and space
+    /// has been freed.
     fn write(&mut self, elem: T) -> Result<(), BufferError> {
         // Consumer was dropped, the channel is closed.
         if self.dropped.load(Ordering::Acquire) {
@@ -190,7 +189,8 @@ impl<T> Producer<T> {
     /// Push a new element to the underlying buffer.
     ///
     /// If the consumer was dropped, [BufferError::Write] is returned and it should no longer be possible to consume values from the buffer.
-    /// If the buffer is full, [BufferError::BufferFull] is returned. It's up to the caller to call this method again until space has been freed.
+    /// If the buffer is full, it busy spins until the consumer has caught up and space
+    /// has been freed.
     #[inline]
     pub fn push(&mut self, elem: T) -> Result<(), BufferError> {
         unsafe { self.buffer.ptr().as_mut().unwrap().write(elem) }
