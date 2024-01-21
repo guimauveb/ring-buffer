@@ -123,13 +123,9 @@ impl<T> Buffer<T> {
         if next_write == self.capacity {
             next_write = 0;
         }
-        loop {
-            let read = self.read.load(Ordering::Acquire);
-            // Buffer is full. Busy spin until read has caught up.
-            if next_write == read {
-                continue;
-            }
-            break;
+        // Buffer is full. Busy spin until read has caught up.
+        while self.read.load(Ordering::Acquire) == next_write {
+            continue;
         }
         unsafe {
             ptr::write(&mut *self.ptr.as_ptr().add(write), elem);
