@@ -2,11 +2,27 @@
 
 Implementation of a lock-free, thread safe ring buffer in Rust.
 
-## Architecture
+## Notes
+I made this project to learn more about lock-free datastructures, unsafe Rust and asynchronous code.
 
-TODO
+## Architecture
+The ring buffer is implemented using two raw pointers, one for the producer and one for the consumer.
+Because having two mutable references into the same block of memory is inherently unsafe, the implementation uses `unsafe` code (which is not fully tested yet).
+
+### Memory
+The consumer `Drop` implementation is responsible for the ring buffer memory deallocation.
+
+### Behaviour
+When the buffer is full, the current implementation of the `write` method will busy-spin until the consumer has caught up and memory has been freed. This is the fastest
+option but not necessarily the best one depending on the code that uses the buffer. Two other "flavours" are being considered:
+  - An implementation where threads are parked/unparked when the channel is empty or full.
+  - An `async` implementation:
+       - From the consumer side, when the buffer is empty, `await` for the producer until it produces a value or is dropped.
+       - From the producer side, when the buffer is full, `await` for the consumer until it consumes a value or is dropped.
 
 ## TODO
+  - Docstring
+
   ### Features
   - Implement optimizations from https://rigtorp.se/ringbuffer/
   - Async implementation for producer/consumer so that we can await instead of blocking:
@@ -15,7 +31,7 @@ TODO
   - Implementation where threads are parked/unparked when channel is empty/full
 
   ### Tests
-  - Memory safety, deallocation
+  - Memory safety
 
   ### Benchmarks
   - Bench default allocator and jemalloc
