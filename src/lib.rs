@@ -16,6 +16,7 @@ use std::{
 };
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 enum AllocInit {
     /// The contents of the new memory are uninitialized.
     Uninitialized,
@@ -38,7 +39,7 @@ fn alloc_guard(alloc_size: usize) -> Result<(), AllocError> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BufferError {
     /// Consumer has been dropped
     Write,
@@ -61,7 +62,7 @@ impl<T> Drop for Buffer<T> {
         if self.capacity != 0 {
             let layout = Layout::array::<T>(self.capacity).unwrap();
             unsafe {
-                alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+                alloc::dealloc(self.ptr.as_ptr().cast::<u8>(), layout);
             }
         }
     }
@@ -109,10 +110,10 @@ impl<T> Buffer<T> {
 
     /// Write a new element in the underlying buffer.
     ///
-    /// If the consumer was dropped, [BufferError::Write] is returned and it should no longer be possible to consume values from the buffer.
+    /// If the consumer was dropped, [`BufferError::Write`] is returned and it should no longer be possible to consume values from the buffer.
     /// If the buffer is full, the methods busy spins until the consumer has caught up and space
     /// has been freed.
-    fn write(&mut self, elem: T) -> Result<(), BufferError> {
+    fn write_or_spin(&mut self, elem: T) -> Result<(), BufferError> {
         // Consumer was dropped, the channel is closed.
         if self.dropped.load(Ordering::Acquire) {
             return Err(BufferError::Write);
@@ -140,7 +141,7 @@ impl<T> Buffer<T> {
 
     /// Read the next readable element from the buffer.
     ///
-    /// If the producer was dropped and the buffer is empty, [BufferError::Read] is returned to
+    /// If the producer was dropped and the buffer is empty, [`BufferError::Read`] is returned to
     /// signal that the buffer will not contain any value anymore.
     /// `None` is returned if the buffer is empty but the producer is still alive.
     fn read(&mut self) -> Result<Option<T>, BufferError> {
@@ -186,22 +187,26 @@ pub struct Producer<T> {
 }
 
 impl<T> Producer<T> {
-    /// Push a new element to the underlying buffer.
-    ///
-    /// If the consumer was dropped, [BufferError::Write] is returned and it should no longer be possible to consume values from the buffer.
-    /// If the buffer is full, it busy spins until the consumer has caught up and space
-    /// has been freed.
+    /// Push a new element to the underlying buffer. If the buffer is full, it busy spins until the consumer has caught up and space has been freed.
+    /// # Errors
+    /// If the consumer was dropped, [`BufferError::Write`] is returned and it should no longer be possible to consume values from the buffer.
     #[inline]
-    pub fn push(&mut self, elem: T) -> Result<(), BufferError> {
-        unsafe { self.buffer.ptr().as_mut().unwrap().write(elem) }
+    pub fn push_or_spin(&mut self, elem: T) -> Result<(), BufferError> {
+        unsafe {
+            self.buffer
+                .ptr()
+                .as_mut()
+                .expect("Point is valid")
+                .write_or_spin(elem)
+        }
     }
 }
 
 impl<T> Drop for Producer<T> {
-    /// Only marks the producer as dropped so that the consumer knows that this channel is closed
+    /// Only marks the producer as dropped so that the consumer knows this channel is closed
     /// and will no longer receive values.
     ///
-    /// It is the [Consumer] responsibility to free the buffer in its drop implementation.
+    /// It is the [`Consumer`] responsibility to free the buffer in its drop implementation.
     fn drop(&mut self) {
         unsafe {
             let buffer = self.buffer.ptr();
@@ -218,12 +223,14 @@ pub struct Consumer<T> {
 impl<T> Consumer<T> {
     /// Pop the next available element from the buffer.
     ///
-    /// If the producer was dropped and the buffer is empty, [BufferError::Read] is returned to
+    /// # Errors
+    /// If the producer was dropped and the buffer is empty, [`BufferError::Read`] is returned to
     /// signal that the buffer will not contain any value anymore.
+    ///
     /// `None` is returned if the buffer is empty but the producer is still alive.
     #[inline]
     pub fn pop(&mut self) -> Result<Option<T>, BufferError> {
-        unsafe { self.buffer.ptr().as_mut().unwrap().read() }
+        unsafe { self.buffer.ptr().as_mut().expect("Pointer is valid").read() }
     }
 }
 
@@ -231,8 +238,7 @@ impl<T> Drop for Consumer<T> {
     fn drop(&mut self) {
         unsafe {
             let buffer = self.buffer.ptr();
-            // Mark the consumer as dropped so that the producer knows that this channel is closed
-            // and will no longer receive values.
+            // Mark the consumer as dropped so that the producer knows this channel is closed and will no longer receive values.
             (*buffer).dropped.store(true, Ordering::Release);
             // Free the buffer memory.
             ptr::drop_in_place(buffer);
@@ -265,6 +271,7 @@ pub struct RingBuffer<T> {
 impl<T> RingBuffer<T> {
     /// Initialize a ring buffer with the given capacity.
     #[allow(clippy::new_ret_no_self)]
+    #[must_use]
     pub fn new(capacity: usize) -> (Producer<T>, Consumer<T>) {
         let buffer = Box::into_raw(Box::new(Buffer::with_capacity(capacity + 1)));
         (
@@ -289,7 +296,7 @@ mod tests {
         let (mut producer, consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
         let p = thread::spawn(move || {
             for i in 0..BUFFER_SIZE * 1000 {
-                _ = producer.push(i.to_string());
+                _ = producer.push_or_spin(i.to_string());
             }
         });
         let c = thread::spawn(move || for _ in consumer {});
