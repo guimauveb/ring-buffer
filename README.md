@@ -13,8 +13,8 @@ Because having two mutable references into the same block of memory is inherentl
 The consumer `Drop` implementation is responsible for the ring buffer memory deallocation.
 
 ### Behaviour
-When the buffer is full, the current implementation of the `write` method will busy-spin until the consumer has caught up and memory has been freed. This is the fastest
-option but not necessarily the best one depending on the code that uses the buffer. Two other "flavours" are being considered:
+When the buffer is full, the current implementation of the `write` method will busy-spin until the consumer has caught up and memory has been freed. __The unread data
+is not overwritten__. This is the fastest option (when not overwritting data) but not necessarily the best one depending on the code that uses the buffer. Two other "flavours" are being considered:
   - An implementation where threads are parked/unparked when the channel is empty or full.
   - An `async` implementation:
        - From the consumer side, when the buffer is empty, `await` for the producer until it produces a value or is dropped.
