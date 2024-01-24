@@ -24,7 +24,6 @@ is not overwritten__. This is the fastest option (when not overwritting data) bu
   - Docstring
 
   ### Features
-  - Implement optimizations from https://rigtorp.se/ringbuffer/
   - Async implementation for producer/consumer so that we can await instead of blocking:
      - From the consumer side, await for the producer to produce a value or be dropped
      - From the producer side, await for the consumer to read a value to free space or be dropped
