@@ -36,7 +36,6 @@ is not overwritten__. This is the fastest option (when not overwritting data) bu
   - Bench default allocator and jemalloc
   - Bench with more types
   - Bench w/wo cache alignment
-  - Bench optimizations from https://rigtorp.se/ringbuffer/
   - Bench park/unpark threads
   - Bench async implementation
 
