@@ -269,6 +269,7 @@ impl<T> RingBuffer<T> {
     #[allow(clippy::new_ret_no_self)]
     #[must_use]
     pub fn new(capacity: usize) -> (Producer<T>, Consumer<T>) {
+        assert!(capacity >= 1);
         let buffer = Box::into_raw(Box::new(Buffer::with_capacity(capacity + 1)));
         (
             Producer {
@@ -281,21 +282,24 @@ impl<T> RingBuffer<T> {
     }
 }
 
+// TODO - Produce n values, assert that the same n values are consumed FIFO.
 #[cfg(test)]
 mod tests {
     use {super::RingBuffer, std::thread};
 
-    const BUFFER_SIZE: usize = 16;
-
     #[test]
-    fn ring_buffer() {
-        let (mut producer, consumer) = RingBuffer::<String>::new(BUFFER_SIZE);
+    fn ring_buffer_100m_100k() {
+        let (mut producer, consumer) = RingBuffer::new(100_000);
         let p = thread::spawn(move || {
-            for i in 0..BUFFER_SIZE * 1000 {
-                _ = producer.push_or_spin(i.to_string());
+            core_affinity::set_for_current(core_affinity::CoreId { id: 1 });
+            for i in 0..100_000_000 {
+                _ = producer.push_or_spin(i);
             }
         });
-        let c = thread::spawn(move || for _ in consumer {});
+        let c = thread::spawn(move || {
+            core_affinity::set_for_current(core_affinity::CoreId { id: 2 });
+            for _ in consumer {}
+        });
         p.join().unwrap();
         c.join().unwrap();
     }
