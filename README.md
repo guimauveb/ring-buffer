@@ -3,7 +3,7 @@
 Implementation of a lock-free, thread safe ring buffer in Rust.
 
 ## Notes
-I made this project to learn more about lock-free datastructures, unsafe Rust and asynchronous code.
+I made this project to learn more about lock-free datastructures and unsafe Rust.
 
 ## Architecture
 The ring buffer is implemented using two raw pointers, one for the producer and one for the consumer.
@@ -20,9 +20,7 @@ is not overwritten__. This is the fastest option (when not overwritting data) bu
        - From the consumer side, when the buffer is empty, `await` for the producer until it produces a value or is dropped.
        - From the producer side, when the buffer is full, `await` for the consumer until it consumes a value or is dropped.
 
-## TODO
-  - Docstring
-
+## Bonus
   ### Features
   - Async implementation for producer/consumer so that we can await instead of blocking:
      - From the consumer side, await for the producer to produce a value or be dropped
@@ -38,6 +36,4 @@ is not overwritten__. This is the fastest option (when not overwritting data) bu
   - Bench w/wo cache alignment
   - Bench park/unpark threads
   - Bench async implementation
-
-## Bonus
   - Compare perf with/without pinned threads

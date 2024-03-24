@@ -119,10 +119,11 @@ impl<T> Buffer<T> {
             return Err(BufferError::Write);
         }
         let write = self.write.load(Ordering::Acquire);
-        let mut next_write = write + 1;
-        if next_write == self.capacity {
-            next_write = 0;
-        }
+        let next_write = if write == self.capacity - 1 {
+            0
+        } else {
+            write + 1
+        };
         // Buffer is full. Busy spin until read has caught up.
         while self.read.load(Ordering::Acquire) == next_write {
             continue;
@@ -151,10 +152,11 @@ impl<T> Buffer<T> {
                 Ok(None)
             }
         } else {
-            let mut next_read = read + 1;
-            if next_read == self.capacity {
-                next_read = 0;
-            }
+            let next_read = if read == self.capacity - 1 {
+                0
+            } else {
+                read + 1
+            };
             unsafe {
                 let elem = ptr::read(&*self.ptr.as_ptr().add(read));
                 self.read.store(next_read, Ordering::Release);
@@ -282,7 +284,6 @@ impl<T> RingBuffer<T> {
     }
 }
 
-// TODO - Produce n values, assert that the same n values are consumed FIFO.
 #[cfg(test)]
 mod tests {
     use {super::RingBuffer, std::thread};
